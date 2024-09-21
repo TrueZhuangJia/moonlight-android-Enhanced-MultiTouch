@@ -61,7 +61,6 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.util.Rational;
-import android.util.Log;
 import android.view.Display;
 import android.view.InputDevice;
 import android.view.KeyCharacterMap;
@@ -79,6 +78,7 @@ import android.widget.FrameLayout;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.util.Log;
 
 import java.io.ByteArrayInputStream;
 import java.lang.reflect.InvocationTargetException;
@@ -100,6 +100,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     private int lastButtonState = 0;
 
     // Only 2 touches are supported
+    // 通过这个context map 限制了允许处理的actionIndex(pointerIndex)为 0, 1.
+    // (actionIndex表示触发了当前触点事件的触点的pointerIndex， 然而这仅对非action_move的event成立)
+    // action_move发生时， 给出的actionIndex只会是0, 此时actionIndex就不再表示某个触点的pointerIndex
+    // absolute和relative能处理的down & up触点的数量只有2个。
     private final TouchContext[] touchContextMap = new TouchContext[2];
     private long multiFingerDownTime = 0;
 
@@ -191,6 +195,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        Log.d("MotionEvent.ACTION_DOWN", ""+ MotionEvent.ACTION_DOWN);
+        Log.d("MotionEvent.ACTION_UP", ""+ MotionEvent.ACTION_UP);
+        Log.d("MotionEvent.ACTION_MOVE", ""+ MotionEvent.ACTION_MOVE);
 
         UiHelper.setLocale(this);
 
@@ -511,6 +519,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         inputManager.registerInputDeviceListener(keyboardTranslator, null);
 
         // Initialize touch contexts
+        // Game onCreate, 仅为两个触点0, 1 两个actionIndex(pointerIndex)生成了touch context.
+        // 说明只有屏上首先出现的两个触点才能获得actionIndex
         for (int i = 0; i < touchContextMap.length; i++) {
             if (!prefConfig.touchscreenTrackpad) {
                 touchContextMap[i] = new AbsoluteTouchContext(conn, i, streamView);
@@ -518,7 +528,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             else {
                 touchContextMap[i] = new RelativeTouchContext(conn, i,
                         REFERENCE_HORIZ_RES, REFERENCE_VERT_RES,
-                        streamView, prefConfig);
+                        streamView, prefConfig); // 这里的actionIndex是提前定义的， 调用context时， 会按index查询到对应context对象
             }
         }
 
@@ -1486,6 +1496,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
         return true;
     }
 
+    //
     private TouchContext getTouchContext(int actionIndex)
     {
         if (actionIndex < touchContextMap.length) {
@@ -1771,7 +1782,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 getRotationDegrees(event, pointerIndex)) != MoonBridge.LI_ERR_UNSUPPORTED;
     }
 
-    private boolean trySendTouchEvent(View view, MotionEvent event) {
+    // 这个就是专门发送native touch event的，和 absolute, relative touch无关
+    private boolean trySendNativeTouchEvent(View view, MotionEvent event) {
         byte eventType = getLiTouchTypeFromEvent(event);
         if (eventType < 0) {
             return false;
@@ -2054,15 +2066,16 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             // This case is for fingers
             else  //abs touch 和 屏幕虚拟手柄所属的判断条件
             {
+                // 多点触控传:
                 // TODO: Re-enable native touch when have a better solution for handling
                 // cancelled touches from Android gestures and 3 finger taps to activate
                 // the software keyboard.
-                // 调整一下native touch passthrough的代码顺序
-                if (!prefConfig.touchscreenTrackpad && trySendTouchEvent(view, event)) {
+                if (!prefConfig.touchscreenTrackpad && trySendNativeTouchEvent(view, event)) {
                     // If this host supports touch events and absolute touch is enabled,
                     // send it directly as a touch event.
                     return true;
                 }
+
 
                 if (virtualController != null &&
                         (virtualController.getControllerMode() == VirtualController.ControllerMode.MoveButtons ||
@@ -2083,7 +2096,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     yOffset = 0.f;
                 }
 
-                int actionIndex = event.getActionIndex();
+                int actionIndex = event.getActionIndex(); // 获取当前action触发触点的pointerIndex
 
                 int eventX = (int)(event.getX(actionIndex) + xOffset);
                 int eventY = (int)(event.getY(actionIndex) + yOffset);
@@ -2103,30 +2116,28 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     return true;
                 }
 
+                // 这里真正开始用relative或absolute两种方式处理触点
+                TouchContext context = getTouchContext(actionIndex); // 用刚刚获取的当前actionIndex, 通过map获取到对应的touchContext
 
-                // TODO: Re-enable native touch when have a better solution for handling
-                // cancelled touches from Android gestures and 3 finger taps to activate
-                // the software keyboard.
-                /*
-                if (!prefConfig.touchscreenTrackpad && trySendTouchEvent(view, event)) {
-                    // If this host supports touch events and absolute touch is enabled,
-                    // send it directly as a touch event.
-                    return true;
-                }*/
-
-                TouchContext context = getTouchContext(actionIndex);
-                if (context == null) {
+                if (context == null) { // 如果出现了0, 1之外的actionIndex, context为null, 整个方法直接返回
                     return false;
                 }
 
                 switch (event.getActionMasked())
                 {
                 case MotionEvent.ACTION_POINTER_DOWN:
+                    for (TouchContext touchContext : touchContextMap) {
+                        touchContext.setPointerCount(event.getPointerCount()); //为所有的context实例更新一下当前的pointer(触点)数量
+                    }
+                    context.touchDownEvent(event.getPointerId(actionIndex), eventX, eventY, event.getEventTime(), true, false); // 对于action pointer down来说， 不是FirstFinger
+                    break;
                 case MotionEvent.ACTION_DOWN:
                     for (TouchContext touchContext : touchContextMap) {
-                        touchContext.setPointerCount(event.getPointerCount());
+                        touchContext.setPointerCount(event.getPointerCount()); //为所有的context实例更新一下当前的pointer(触点)数量
                     }
-                    context.touchDownEvent(eventX, eventY, event.getEventTime(), true);
+                    // 此处的context就可能是absolute, 或relative两种， 使用了统一的abstract class调用
+                    // 而且此处的context就是从contextMap里提前创建的对象中获取到的在上面的case: action down中已经遍历过一次。
+                    context.touchDownEvent(event.getPointerId(actionIndex), eventX, eventY, event.getEventTime(), true, true); // 对于action down来说， isNewFinger必然是true?
                     break;
                 case MotionEvent.ACTION_POINTER_UP:
                 case MotionEvent.ACTION_UP:
@@ -2141,6 +2152,7 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                         }
                     }
 
+                    // 调用context
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && (event.getFlags() & MotionEvent.FLAG_CANCELED) != 0) {
                         context.cancelTouch();
                     }
@@ -2151,12 +2163,13 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                     for (TouchContext touchContext : touchContextMap) {
                         touchContext.setPointerCount(event.getPointerCount() - 1);
                     }
+
                     if (actionIndex == 0 && event.getPointerCount() > 1 && !context.isCancelled()) {
                         // The original secondary touch now becomes primary
-                        context.touchDownEvent(
+                        context.touchDownEvent(event.getPointerId(actionIndex),
                                 (int)(event.getX(1) + xOffset),
                                 (int)(event.getY(1) + yOffset),
-                                event.getEventTime(), false);
+                                event.getEventTime(), false, false);
                     }
                     break;
                 case MotionEvent.ACTION_MOVE:
@@ -2165,32 +2178,32 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
                     // First process the historical events
                     for (int i = 0; i < event.getHistorySize(); i++) {
-                        for (TouchContext aTouchContextMap : touchContextMap) {
-                            if (aTouchContextMap.getActionIndex() < event.getPointerCount())
+                        for (TouchContext touchContext : touchContextMap) {
+                            if (touchContext.getActionIndex() < event.getPointerCount())
                             {
-                                aTouchContextMap.touchMoveEvent(
-                                        (int)(event.getHistoricalX(aTouchContextMap.getActionIndex(), i) + xOffset),
-                                        (int)(event.getHistoricalY(aTouchContextMap.getActionIndex(), i) + yOffset),
+                                touchContext.touchMoveEvent(event.getPointerId(touchContext.getActionIndex()),
+                                        (int)(event.getHistoricalX(touchContext.getActionIndex(), i) + xOffset),
+                                        (int)(event.getHistoricalY(touchContext.getActionIndex(), i) + yOffset),
                                         event.getHistoricalEventTime(i));
                             }
                         }
                     }
 
                     // Now process the current values
-                    for (TouchContext aTouchContextMap : touchContextMap) {
-                        if (aTouchContextMap.getActionIndex() < event.getPointerCount())
+                    for (TouchContext touchContext : touchContextMap) {
+                        if (touchContext.getActionIndex() < event.getPointerCount())
                         {
-                            aTouchContextMap.touchMoveEvent(
-                                    (int)(event.getX(aTouchContextMap.getActionIndex()) + xOffset),
-                                    (int)(event.getY(aTouchContextMap.getActionIndex()) + yOffset),
+                            touchContext.touchMoveEvent(event.getPointerId(touchContext.getActionIndex()),
+                                    (int)(event.getX(touchContext.getActionIndex()) + xOffset),
+                                    (int)(event.getY(touchContext.getActionIndex()) + yOffset),
                                     event.getEventTime());
                         }
                     }
                     break;
                 case MotionEvent.ACTION_CANCEL:
-                    for (TouchContext aTouchContext : touchContextMap) {
-                        aTouchContext.cancelTouch();
-                        aTouchContext.setPointerCount(0);
+                    for (TouchContext touchContext : touchContextMap) {
+                        touchContext.cancelTouch();
+                        touchContext.setPointerCount(0);
                     }
                     break;
                 default:

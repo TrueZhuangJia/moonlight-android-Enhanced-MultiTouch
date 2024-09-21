@@ -36,9 +36,11 @@ import android.os.SystemClock;
 import android.util.Range;
 import android.view.Choreographer;
 import android.view.SurfaceHolder;
+import android.util.Log;
+
 
 public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements Choreographer.FrameCallback {
-
+    private long frameRenderingTimeStamp = System.nanoTime()/1000;
     private static final boolean USE_FRAME_RENDER_TIME = false;
     private static final boolean FRAME_RENDER_TIME_ONLY = USE_FRAME_RENDER_TIME && false;
 
@@ -970,21 +972,60 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
         return false;
     }
 
+
+    private void renderVideoFrame(long frameTimeNanos) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            frameTimeNanos -= activity.getWindowManager().getDefaultDisplay().getAppVsyncOffsetNanos();
+        }
+
+        Integer nextOutputBuffer = outputBufferQueue.poll();
+        if (nextOutputBuffer != null) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                    videoDecoder.releaseOutputBuffer(nextOutputBuffer, frameTimeNanos);
+                }
+                else {
+                    videoDecoder.releaseOutputBuffer(nextOutputBuffer, true);
+                }
+                activeWindowVideoStats.totalFramesRendered++;
+            } catch (IllegalStateException ignored) {
+                try {
+                    // Try to avoid leaking the output buffer by releasing it without rendering
+                    videoDecoder.releaseOutputBuffer(nextOutputBuffer, false);
+                } catch (IllegalStateException e) {
+                    // This will leak nextOutputBuffer, but there's really nothing else we can do
+                    e.printStackTrace();
+                    handleDecoderException(e);
+                }
+            }
+        }
+        // Attempt codec recovery even if we have nothing to render right now. Recovery can still
+        // be required even if the codec died before giving any output.
+        doCodecRecoveryIfRequired(CR_FLAG_CHOREOGRAPHER);
+
+        // Request another callback for next frame
+        Choreographer.getInstance().postFrameCallback(this);
+    }
+
     @Override
     public void doFrame(long frameTimeNanos) {
         // Do nothing if we're stopping
-        if (stopping) {
+       // if (stopping) {
+        if(stopping){
+            // renderVideoFrame(frameTimeNanos);
             return;
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-            frameTimeNanos -= activity.getWindowManager().getDefaultDisplay().getAppVsyncOffsetNanos();
+            // frameTimeNanos -= activity.getWindowManager().getDefaultDisplay().getAppVsyncOffsetNanos();
         }
 
         // Don't render unless a new frame is due. This prevents microstutter when streaming
         // at a frame rate that doesn't match the display (such as 60 FPS on 120 Hz).
         long actualFrameTimeDeltaNs = frameTimeNanos - lastRenderedFrameTimeNanos;
+        // Log.d("actualFrameTimeDeltaNs", "" + actualFrameTimeDeltaNs);
         long expectedFrameTimeDeltaNs = 800000000 / refreshRate; // within 80% of the next frame
+
         if (actualFrameTimeDeltaNs >= expectedFrameTimeDeltaNs) {
             // Render up to one frame when in frame pacing mode.
             //
@@ -1015,6 +1056,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                 }
             }
         }
+
 
         // Attempt codec recovery even if we have nothing to render right now. Recovery can still
         // be required even if the codec died before giving any output.
@@ -1065,12 +1107,13 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                 // Get the last output buffer in the queue
                                 while ((outIndex = videoDecoder.dequeueOutputBuffer(info, 0)) >= 0) {
                                     videoDecoder.releaseOutputBuffer(lastIndex, false);
-
                                     numFramesOut++;
-
                                     lastIndex = outIndex;
                                     presentationTimeUs = info.presentationTimeUs;
                                 }
+                                // Log.d("outIndex", "" + outIndex);
+                                // Log.d("frameRenderingTimeStamp", ""+ (System.nanoTime()/1000 - frameRenderingTimeStamp));
+                                frameRenderingTimeStamp = System.nanoTime()/1000;
 
                                 if (prefs.framePacing == PreferenceConfiguration.FRAME_PACING_MAX_SMOOTHNESS ||
                                         prefs.framePacing == PreferenceConfiguration.FRAME_PACING_CAP_FPS) {
@@ -1084,6 +1127,7 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                     }
                                 }
                                 else {
+                                    // Here goes with "Latency" frame pacing option:
                                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
                                         // Use a PTS that will cause this frame to be dropped if another comes in within
                                         // the same V-sync period
@@ -1093,6 +1137,9 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
                                         videoDecoder.releaseOutputBuffer(lastIndex, true);
                                     }
                                 }
+
+                                // Log.d("renderingTimeCost", ""+ (System.nanoTime()/1000 - frameRenderingTimeStamp));
+
 
                                 activeWindowVideoStats.totalFramesRendered++;
                             }
@@ -1172,6 +1219,8 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
             // Get the backing ByteBuffer for the input buffer index
             if (nextInputBufferIndex >= 0) {
+                // Log.d("bufferIndex", "bufferIndex available: " + nextInputBufferIndex);
+
                 // Using the new getInputBuffer() API on Lollipop allows
                 // the framework to do some performance optimizations for us
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -1205,8 +1254,10 @@ public class MediaCodecDecoderRenderer extends VideoDecoderRenderer implements C
 
         int deltaMs = (int)(SystemClock.uptimeMillis() - startTime);
 
+        // if (deltaMs >= 20) {
         if (deltaMs >= 20) {
             LimeLog.warning("Dequeue input buffer ran long: " + deltaMs + " ms");
+            // Log.d("deque","Dequeue input buffer ran long: " + deltaMs + " ms");
         }
 
         if (nextInputBuffer == null) {

@@ -7,6 +7,7 @@ import com.limelight.nvstream.NvConnection;
 import com.limelight.nvstream.input.MouseButtonPacket;
 
 public class AbsoluteTouchContext implements TouchContext {
+    private int pointerId;
     private int lastTouchDownX = 0;
     private int lastTouchDownY = 0;
     private long lastTouchDownTime = 0;
@@ -80,12 +81,14 @@ public class AbsoluteTouchContext implements TouchContext {
     }
 
     @Override
-    public boolean touchDownEvent(int eventX, int eventY, long eventTime, boolean isNewFinger)
+    public boolean touchDownEvent(int pointerId, int eventX, int eventY, long eventTime, boolean isNewFinger, boolean isFirstFinger)
     {
         if (!isNewFinger) {
             // We don't handle finger transitions for absolute mode
             return true;
         }
+
+        this.pointerId = pointerId;
 
         lastTouchLocationX = lastTouchDownX = eventX;
         lastTouchLocationY = lastTouchDownY = eventY;
@@ -189,7 +192,7 @@ public class AbsoluteTouchContext implements TouchContext {
     }
 
     @Override
-    public boolean touchMoveEvent(int eventX, int eventY, long eventTime)
+    public boolean touchMoveEvent(int pointerId, int eventX, int eventY, long eventTime)
     {
         if (cancelled) {
             return true;
